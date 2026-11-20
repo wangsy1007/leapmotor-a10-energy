@@ -58,13 +58,23 @@ class TripDetailViewModel(private val graph: AppGraph, private val id: String) :
     }
 
     fun saveNote(note: String, tags: String) = viewModelScope.launch {
-        graph.trips.updateNote(id, note, tags)
+        val server = graph.serverConfig.current()
+        message.value = if (server.mode == cn.daqing.leap.a10energy.data.CollectMode.SERVER && server.serverReady) {
+            graph.serverSync.updateNote(id, note, tags)
+        } else {
+            graph.trips.updateNote(id, note, tags)
+            "备注已保存"
+        }
         trip.value = graph.trips.getTrip(id)
-        message.value = "备注已保存"
     }
 
     fun delete(onDone: () -> Unit) = viewModelScope.launch {
-        graph.trips.deleteTrip(id)
+        val server = graph.serverConfig.current()
+        if (server.mode == cn.daqing.leap.a10energy.data.CollectMode.SERVER && server.serverReady) {
+            graph.serverSync.deleteTrip(id)
+        } else {
+            graph.trips.deleteTrip(id)
+        }
         onDone()
     }
 }

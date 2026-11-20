@@ -48,12 +48,31 @@ import cn.daqing.leap.a10energy.domain.sourceLabel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 
-class TripsViewModel(graph: AppGraph) : ViewModel() {
+class TripsViewModel(private val graph: AppGraph) : ViewModel() {
     val trips: StateFlow<List<TripRecord>> =
         graph.trips.observeTrips().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val settings: StateFlow<AppSettings> =
         graph.settings.flow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettings())
+    val serverConfig = graph.serverConfig.flow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), cn.daqing.leap.a10energy.data.ServerConfig())
+
+    fun pull() = viewModelScope.launch {
+        if (graph.serverConfig.current().mode == cn.daqing.leap.a10energy.data.CollectMode.SERVER) {
+            graph.serverSync.refresh()
+        }
+    }
+
+    suspend fun exportText(shown: List<TripRecord>, capacity: Double): String {
+        val config = graph.serverConfig.current()
+        return if (config.mode == cn.daqing.leap.a10energy.data.CollectMode.SERVER && config.serverReady) {
+            graph.serverSync.exportCsvText(capacity)
+        } else {
+            exportCsv(shown, capacity)
+        }
+    }
 }
 
 @Composable
@@ -63,6 +82,13 @@ fun TripsScreen(nav: NavController) {
     val vm = viewModel { TripsViewModel(app.graph) }
     val trips by vm.trips.collectAsState()
     val settings by vm.settings.collectAsState()
+    val server by vm.serverConfig.collectAsState()
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(server.mode, server.serverReady) {
+        if (server.mode == cn.daqing.leap.a10energy.data.CollectMode.SERVER && server.serverReady) {
+            vm.pull()
+        }
+    }
     var preset by rememberSaveable { mutableStateOf(DatePreset.ALL.name) }
     var temp by rememberSaveable { mutableStateOf("all") }
     var tag by rememberSaveable { mutableStateOf("") }
@@ -84,6 +110,9 @@ fun TripsScreen(nav: NavController) {
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text("行程", style = MaterialTheme.typography.headlineMedium)
+        if (server.mode == cn.daqing.leap.a10energy.data.CollectMode.SERVER) {
+            Banner("服务器模式：列表来自服务端并缓存到本机，断网仍可查看。")
+        }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(DatePreset.ALL to "全部", DatePreset.TODAY to "今天", DatePreset.D7 to "近 7 天", DatePreset.D30 to "近 30 天", DatePreset.MONTH to "本月").forEach { (value, label) ->
                 FilterChip(selected = datePreset == value, onClick = { preset = value.name }, label = { Text(label) })
@@ -98,7 +127,12 @@ fun TripsScreen(nav: NavController) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(onClick = { nav.navigate(Routes.manual()) }, modifier = Modifier.weight(1f)) { Text("手动补录") }
             OutlinedButton(
-                onClick = { shareText(context, "a10-trips.csv", exportCsv(shown, settings.capacityKwh), "text/csv") },
+                onClick = {
+                    scope.launch {
+                        val csv = vm.exportText(shown, settings.capacityKwh)
+                        shareText(context, "a10-trips.csv", csv, "text/csv")
+                    }
+                },
                 modifier = Modifier.weight(1f),
             ) { Text("导出 CSV") }
         }

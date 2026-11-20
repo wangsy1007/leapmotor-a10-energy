@@ -27,15 +27,20 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cn.daqing.leap.a10energy.A10App
+import cn.daqing.leap.a10energy.data.CollectMode
+import cn.daqing.leap.a10energy.data.ServerConfig
 import cn.daqing.leap.a10energy.domain.diagnoseSignalKeys
 import cn.daqing.leap.a10energy.protocol.AppJson
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 
 class DiagnosticsViewModel(private val app: A10App) : ViewModel() {
     val text = MutableStateFlow("点下面的按钮拉取。令牌会脱敏，signalMap 会保留。")
     val busy = MutableStateFlow(false)
+    val serverConfig = app.graph.serverConfig.flow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ServerConfig())
 
     fun run(block: suspend () -> String) = viewModelScope.launch {
         busy.value = true
@@ -58,6 +63,7 @@ class DiagnosticsViewModel(private val app: A10App) : ViewModel() {
         "$checks\n\n$raw"
     }
     fun energy() = run { app.graph.sync.captureTodayEnergy() }
+    fun serverDiag() = run { app.graph.serverSync.runDiagnostics() }
     fun allFiles() = app.graph.diagnostics.readAll()
 }
 
@@ -79,6 +85,7 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
     val vm = viewModel { DiagnosticsViewModel(app) }
     val text by vm.text.collectAsState()
     val busy by vm.busy.collectAsState()
+    val server by vm.serverConfig.collectAsState()
     var hint by rememberSaveable { mutableStateOf("") }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -89,8 +96,16 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
             "公开协议没有 A10 的实测记录。请在真机上依次核对：carType、appRegion、signalMap 里有没有 100003/1204/1318/1010/1149/1182/1349/sts，以及今日 getLastweekEC。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Button(onClick = { vm.vehicles() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("车辆列表") }
-        Button(onClick = { vm.route() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("getCarRoute") }
+        if (server.mode == CollectMode.SERVER) {
+            Banner("当前为服务器模式：可一键触发服务端脱敏诊断。")
+            Button(
+                onClick = { vm.serverDiag() },
+                enabled = !busy && server.serverReady,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("运行服务端诊断") }
+        }
+        Button(onClick = { vm.vehicles() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("车辆列表（本机直连）") }
+        Button(onClick = { vm.route() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("getCarRoute（本机直连）") }
         Button(onClick = { vm.signal() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("车况 signalMap（不记行程）") }
         Button(onClick = { vm.energy() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("今日官方能耗") }
         OutlinedButton(

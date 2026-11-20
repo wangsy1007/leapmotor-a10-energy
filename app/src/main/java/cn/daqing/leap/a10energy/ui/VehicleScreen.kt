@@ -22,6 +22,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -35,6 +36,9 @@ import androidx.navigation.NavController
 import cn.daqing.leap.a10energy.A10App
 import cn.daqing.leap.a10energy.AppGraph
 import cn.daqing.leap.a10energy.data.AppSettings
+import cn.daqing.leap.a10energy.data.CollectMode
+import cn.daqing.leap.a10energy.data.ServerConfig
+import cn.daqing.leap.a10energy.data.ServerStatusPayload
 import cn.daqing.leap.a10energy.data.db.SyncStateEntity
 import cn.daqing.leap.a10energy.domain.TripRecord
 import cn.daqing.leap.a10energy.domain.TripStatus
@@ -48,7 +52,6 @@ import cn.daqing.leap.a10energy.domain.socLabel
 import cn.daqing.leap.a10energy.protocol.AppJson
 import cn.daqing.leap.a10energy.service.PollService
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -56,16 +59,54 @@ class VehicleViewModel(private val graph: AppGraph) : ViewModel() {
     val trips = graph.trips.observeTrips().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val sync = graph.trips.observeSync().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val settings = graph.settings.flow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettings())
+    val serverConfig = graph.serverConfig.flow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ServerConfig())
+    val serverStatus = graph.serverSync.serverStatus
+    val modeHint = graph.serverSync.modeHint
     val snapshot = graph.cache.snapshot
     val message = graph.cache.message
     val busy = graph.cache.busy
     val vehicles = graph.cache.vehicles
 
-    fun refresh() = viewModelScope.launch { graph.sync.refresh() }
-    fun startTrip() = viewModelScope.launch { graph.sync.manualStart() }
-    fun endTrip() = viewModelScope.launch { graph.sync.manualEnd() }
+    fun refresh() = viewModelScope.launch {
+        if (graph.serverConfig.current().mode == CollectMode.SERVER) {
+            graph.serverSync.pollNow()
+        } else {
+            graph.sync.refresh()
+        }
+    }
+
+    fun pullStatus() = viewModelScope.launch {
+        if (graph.serverConfig.current().mode == CollectMode.SERVER) {
+            graph.serverSync.refresh()
+        }
+    }
+
+    fun startTrip() = viewModelScope.launch {
+        if (graph.serverConfig.current().mode == CollectMode.SERVER) {
+            graph.serverSync.manualStart()
+        } else {
+            graph.sync.manualStart()
+        }
+    }
+
+    fun endTrip() = viewModelScope.launch {
+        if (graph.serverConfig.current().mode == CollectMode.SERVER) {
+            graph.serverSync.manualEnd()
+        } else {
+            graph.sync.manualEnd()
+        }
+    }
+
     fun select(vin: String) = viewModelScope.launch { graph.sync.selectVehicle(vin) }
-    fun setAuto(enabled: Boolean) = viewModelScope.launch { graph.settings.update { it.copy(autoRecord = enabled) } }
+
+    fun setAuto(enabled: Boolean) = viewModelScope.launch {
+        val server = graph.serverConfig.current()
+        if (server.mode == CollectMode.SERVER) {
+            graph.serverSync.setCollector(enabled)
+        } else {
+            graph.settings.update { it.copy(autoRecord = enabled) }
+        }
+    }
 
     init {
         if (graph.cache.snapshot.value == null) {
@@ -88,27 +129,45 @@ fun VehicleScreen(nav: NavController) {
     val trips by vm.trips.collectAsState()
     val sync by vm.sync.collectAsState()
     val settings by vm.settings.collectAsState()
+    val server by vm.serverConfig.collectAsState()
+    val serverStatus by vm.serverStatus.collectAsState()
+    val modeHint by vm.modeHint.collectAsState()
     val snap by vm.snapshot.collectAsState()
     val message by vm.message.collectAsState()
     val busy by vm.busy.collectAsState()
     val vehicles by vm.vehicles.collectAsState()
-    val open = trips.firstOrNull { it.status == TripStatus.OPEN }
+    val open = trips.firstOrNull { it.status == TripStatus.OPEN } ?: serverStatus?.openTrip
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val serverMode = server.mode == CollectMode.SERVER
+    LaunchedEffect(serverMode, server.serverReady) {
+        if (serverMode && server.serverReady) vm.pullStatus()
+    }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("车况", style = MaterialTheme.typography.headlineMedium)
         Text("零跑 A10 505 激光雷达版 · 大庆冬季", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (serverMode) {
+            Banner(
+                if (server.sessionPushed) {
+                    "服务器采集模式：登录信息已同步至服务器，现由服务器 24 小时采集。"
+                } else {
+                    "服务器采集模式：请先在设置页填写地址与 Token，登录后推送会话。"
+                },
+            )
+            serverStatus?.let { ServerCollectorCard(it) }
+            if (modeHint.isNotBlank()) Banner(modeHint)
+        }
         if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         BatteryTempCard(snap?.batteryMinTemp)
-        if (sync?.selectedVin.isNullOrBlank()) {
+        if (!serverMode && sync?.selectedVin.isNullOrBlank()) {
             SectionCard {
                 Banner("登录后才能拉云端车况。请使用车辆共享子账号，避免把官方 App 顶下线。", warning = true)
                 Button(onClick = { nav.navigate(Routes.Login) }, modifier = Modifier.fillMaxWidth()) { Text("去登录") }
             }
         }
-        if (vehicles.size > 1) {
+        if (!serverMode && vehicles.size > 1) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 vehicles.forEach { car ->
                     FilterChip(
@@ -150,20 +209,25 @@ fun VehicleScreen(nav: NavController) {
         SectionCard {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.weight(1f)) {
-                    Text("后台自动记录", style = MaterialTheme.typography.titleMedium)
+                    Text(if (serverMode) "服务器自动采集" else "后台自动记录", style = MaterialTheme.typography.titleMedium)
                     Text(
                         "行驶中 ${settings.driveIntervalSec} 秒，停车 ${settings.parkIntervalSec} 秒。充电会自动切段。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                val checked = if (serverMode) serverStatus?.collectorEnabled == true else settings.autoRecord
                 Switch(
-                    checked = settings.autoRecord,
+                    checked = checked,
                     onCheckedChange = { enabled ->
                         vm.setAuto(enabled)
-                        if (enabled) {
-                            if (Build.VERSION.SDK_INT >= 33) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            PollService.start(context)
+                        if (!serverMode) {
+                            if (enabled) {
+                                if (Build.VERSION.SDK_INT >= 33) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                PollService.start(context)
+                            } else {
+                                PollService.stop(context)
+                            }
                         } else {
                             PollService.stop(context)
                         }
@@ -178,6 +242,25 @@ fun VehicleScreen(nav: NavController) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         sync?.let { VinLine(it) }
+    }
+}
+
+@Composable
+private fun ServerCollectorCard(status: ServerStatusPayload) {
+    SectionCard {
+        Text("服务器状态", style = MaterialTheme.typography.titleMedium)
+        Text("版本 ${status.version.ifBlank { "--" }} · ${if (status.collectorRunning) "采集中" else "未运行"}")
+        if (status.rateLimited) {
+            Banner(status.rateLimitMessage ?: "风控冷却中", warning = true)
+        }
+        if (status.sessionSummary.isNotBlank()) {
+            Text(status.sessionSummary, style = MaterialTheme.typography.bodySmall)
+        }
+        Text(
+            "上次轮询 ${cn.daqing.leap.a10energy.domain.Shanghai.format(status.lastPollAt).ifBlank { "--" }}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
