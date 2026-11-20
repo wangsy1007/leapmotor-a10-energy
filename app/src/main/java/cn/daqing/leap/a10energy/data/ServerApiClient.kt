@@ -34,6 +34,9 @@ data class ServerHttpResult(
 
 data class ServerStatusPayload(
     val version: String = "",
+    val userId: String = "",
+    val hasLeapSession: Boolean = false,
+    val tripCount: Int = 0,
     val collectorEnabled: Boolean = false,
     val collectorRunning: Boolean = false,
     val rateLimited: Boolean = false,
@@ -68,7 +71,8 @@ data class OfficialDayDto(
 )
 
 /**
- * 自建采集服务 REST 客户端。Token 与地址由设置页输入，不硬编码。
+ * 自建采集服务 REST 客户端。地址与用户 ID 由设置页输入，不硬编码。
+ * 默认无需 Bearer Token；所有业务请求携带 X-User-Id。
  */
 class ServerApiClient(
     private val configStore: ServerConfigStore,
@@ -79,14 +83,29 @@ class ServerApiClient(
 ) {
     suspend fun testConnection(): ServerHttpResult {
         val config = configStore.current()
-        val health = get("/healthz", config, auth = false)
+        if (!isValidCloudUserId(config.userId)) {
+            val msg = "请先填写合法的用户 ID（2~64 位字母数字._-）"
+            configStore.update { it.copy(lastTestOk = false, lastTestMessage = msg) }
+            return ServerHttpResult(false, -1, msg, "")
+        }
+        val health = get("/healthz", config, requireUser = false)
         if (!health.ok) return health
-        val status = get("/api/v1/status", config, auth = true)
+        val status = get("/api/v1/status", config, requireUser = true)
         val version = status.json?.str("version").orEmpty()
-        val collector = status.json?.obj("collector")
-        val running = collector?.let { it["running"].toString().contains("true") } == true
+        val binding = status.json?.obj("binding")
+        val hasSession = binding?.get("hasLeapSession").toString().contains("true") == true
+            || status.json?.obj("collector")?.get("hasSession").toString().contains("true") == true
+        val tripCount = binding?.intFlex("tripCount")
+            ?: status.json?.obj("binding")?.longFlex("tripCount")?.toInt()
+            ?: 0
+        val uid = binding?.str("userId") ?: config.userId.trim()
         val message = if (status.ok) {
-            "连通正常 · 服务端 $version · 采集${if (running) "中" else "未运行"}"
+            buildString {
+                append("连通正常 · 服务端 $version")
+                append(" · 用户 $uid")
+                append(if (hasSession) " · 已绑定零跑会话" else " · 尚未绑定零跑会话")
+                append(" · 已同步行程 $tripCount 条")
+            }
         } else {
             status.message
         }
@@ -238,8 +257,8 @@ class ServerApiClient(
     suspend fun runDiagnostics(): ServerHttpResult = post("/api/v1/diagnostics/run")
     suspend fun getDiagnostics(): ServerHttpResult = get("/api/v1/diagnostics")
 
-    private suspend fun get(path: String, config: ServerConfig? = null, auth: Boolean = true) =
-        execute("GET", path, null, config, auth)
+    private suspend fun get(path: String, config: ServerConfig? = null, requireUser: Boolean = true) =
+        execute("GET", path, null, config, requireUser)
 
     private suspend fun getRaw(path: String) = execute("GET", path, null, null, true, parseJson = false)
 
@@ -260,7 +279,7 @@ class ServerApiClient(
         path: String,
         body: String?,
         configOverride: ServerConfig?,
-        auth: Boolean,
+        requireUser: Boolean,
         parseJson: Boolean = true,
     ): ServerHttpResult = withContext(Dispatchers.IO) {
         val config = configOverride ?: configStore.current()
@@ -268,12 +287,19 @@ class ServerApiClient(
         if (base.isBlank()) {
             return@withContext ServerHttpResult(false, -1, "请先填写服务器地址", "")
         }
-        if (auth && config.apiToken.isBlank()) {
-            return@withContext ServerHttpResult(false, -1, "请先填写 Bearer Token", "")
+        val userId = config.userId.trim()
+        if (requireUser && !isValidCloudUserId(userId)) {
+            return@withContext ServerHttpResult(false, -1, "请先填写合法的用户 ID", "")
         }
         val url = base + if (path.startsWith("/")) path else "/$path"
         val builder = Request.Builder().url(url)
-        if (auth) builder.header("Authorization", "Bearer ${config.apiToken}")
+        if (requireUser) {
+            builder.header("X-User-Id", userId)
+        }
+        // 仅当用户主动填写了 Token（且服务端也配置了）时附带；默认无 Token 直连。
+        if (config.apiToken.isNotBlank()) {
+            builder.header("Authorization", "Bearer ${config.apiToken}")
+        }
         when (method) {
             "GET" -> builder.get()
             "DELETE" -> builder.delete()
@@ -290,8 +316,14 @@ class ServerApiClient(
                 } else {
                     null
                 }
+                val detail = json?.get("detail")
+                val detailText = when {
+                    detail == null -> null
+                    detail is kotlinx.serialization.json.JsonPrimitive -> detail.content
+                    else -> detail.toString().trim('"')
+                }
                 val message = json?.str("message")
-                    ?: json?.str("detail")
+                    ?: detailText
                     ?: if (response.isSuccessful) "OK" else "HTTP ${response.code}"
                 ServerHttpResult(response.isSuccessful, response.code, message, raw, json)
             }
@@ -307,6 +339,7 @@ internal fun parseStatus(root: JsonObject): ServerStatusPayload {
     val session = root.obj("session")
     val vehicle = root.obj("vehicle")
     val open = root.obj("openTrip")
+    val binding = root.obj("binding")
     val summary = listOfNotNull(
         session?.str("nickname")?.takeIf { it.isNotBlank() },
         session?.str("phoneMasked"),
@@ -314,6 +347,10 @@ internal fun parseStatus(root: JsonObject): ServerStatusPayload {
     ).joinToString(" · ")
     return ServerStatusPayload(
         version = root.str("version").orEmpty(),
+        userId = binding?.str("userId") ?: root.str("userId").orEmpty(),
+        hasLeapSession = binding?.get("hasLeapSession").toString().contains("true")
+            || collector?.get("hasSession").toString().contains("true"),
+        tripCount = binding?.intFlex("tripCount") ?: 0,
         collectorEnabled = collector?.get("enabled").toString().contains("true"),
         collectorRunning = collector?.get("running").toString().contains("true"),
         rateLimited = collector?.get("rateLimited").toString().contains("true"),

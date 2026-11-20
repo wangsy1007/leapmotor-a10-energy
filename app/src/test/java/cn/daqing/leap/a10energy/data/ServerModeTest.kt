@@ -18,7 +18,11 @@ class ServerModeTest {
     @Test
     fun shouldRunLocalPolling_mutexWithServerMode() {
         val local = ServerConfig(mode = CollectMode.LOCAL)
-        val server = ServerConfig(mode = CollectMode.SERVER, baseUrl = "http://192.0.2.10:18080", apiToken = "x")
+        val server = ServerConfig(
+            mode = CollectMode.SERVER,
+            baseUrl = "http://192.0.2.10:18080",
+            userId = "phone-a",
+        )
         assertTrue(shouldRunLocalPolling(local, autoRecord = true))
         assertFalse(shouldRunLocalPolling(local, autoRecord = false))
         assertFalse(shouldRunLocalPolling(server, autoRecord = true))
@@ -26,20 +30,39 @@ class ServerModeTest {
     }
 
     @Test
-    fun serverReady_requiresUrlAndToken() {
-        assertFalse(ServerConfig(mode = CollectMode.SERVER, baseUrl = "http://x", apiToken = "").serverReady)
-        assertFalse(ServerConfig(mode = CollectMode.LOCAL, baseUrl = "http://x", apiToken = "t").serverReady)
-        assertTrue(ServerConfig(mode = CollectMode.SERVER, baseUrl = "http://x", apiToken = "t").serverReady)
+    fun serverReady_requiresUrlAndUserId_notToken() {
+        assertFalse(ServerConfig(mode = CollectMode.SERVER, baseUrl = "http://x", userId = "").serverReady)
+        assertFalse(ServerConfig(mode = CollectMode.SERVER, baseUrl = "http://x", userId = "a").serverReady)
+        assertFalse(ServerConfig(mode = CollectMode.LOCAL, baseUrl = "http://x", userId = "phone-a").serverReady)
+        assertTrue(ServerConfig(mode = CollectMode.SERVER, baseUrl = "http://x", userId = "phone-a").serverReady)
+        assertTrue(ServerConfig(mode = CollectMode.SERVER, baseUrl = "http://x", userId = "phone-a", apiToken = "").serverReady)
     }
 
     @Test
-    fun parseStatus_readsVehicleAndCollector() {
+    fun cloudUserId_validation() {
+        assertTrue(isValidCloudUserId("ab"))
+        assertTrue(isValidCloudUserId("my.user_id-1"))
+        assertFalse(isValidCloudUserId(""))
+        assertFalse(isValidCloudUserId("a"))
+        assertFalse(isValidCloudUserId("bad id"))
+        assertFalse(isValidCloudUserId("中文"))
+    }
+
+    @Test
+    fun parseStatus_readsBindingAndVehicle() {
         val raw = """
             {
-              "version": "1.1.0",
+              "version": "1.2.0",
+              "userId": "phone-a",
+              "binding": {
+                "userId": "phone-a",
+                "hasLeapSession": true,
+                "tripCount": 3
+              },
               "collector": {
                 "enabled": true,
                 "running": true,
+                "hasSession": true,
                 "rateLimited": false,
                 "statusMessage": "ok",
                 "lastError": "",
@@ -68,7 +91,10 @@ class ServerModeTest {
         """.trimIndent()
         val json = AppJson.parseToJsonElement(raw) as JsonObject
         val status = parseStatus(json)
-        assertEquals("1.1.0", status.version)
+        assertEquals("1.2.0", status.version)
+        assertEquals("phone-a", status.userId)
+        assertTrue(status.hasLeapSession)
+        assertEquals(3, status.tripCount)
         assertTrue(status.collectorRunning)
         assertEquals(55.5, status.snapshot!!.soc!!, 0.001)
         assertEquals(-18.0, status.snapshot!!.batteryMinTemp!!, 0.001)

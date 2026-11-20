@@ -35,6 +35,7 @@ import cn.daqing.leap.a10energy.BuildConfig
 import cn.daqing.leap.a10energy.data.AppSettings
 import cn.daqing.leap.a10energy.data.CollectMode
 import cn.daqing.leap.a10energy.data.ServerConfig
+import cn.daqing.leap.a10energy.data.isValidCloudUserId
 import cn.daqing.leap.a10energy.domain.BackoffState
 import cn.daqing.leap.a10energy.domain.Shanghai
 import cn.daqing.leap.a10energy.domain.backoffMessage
@@ -67,11 +68,16 @@ class SettingsViewModel(private val app: A10App) : ViewModel() {
         }
     }
 
-    fun saveServer(baseUrl: String, token: String) = viewModelScope.launch {
-        app.graph.serverConfig.update {
-            it.copy(baseUrl = baseUrl.trim(), apiToken = token.trim())
+    fun saveServer(baseUrl: String, userId: String) = viewModelScope.launch {
+        val uid = userId.trim()
+        if (uid.isNotBlank() && !isValidCloudUserId(uid)) {
+            message.value = "用户 ID 不合法：需 2~64 位字母、数字、下划线、短横线或点号。"
+            return@launch
         }
-        message.value = "服务器地址与 Token 已保存（Token 加密存储）。"
+        app.graph.serverConfig.update {
+            it.copy(baseUrl = baseUrl.trim(), userId = uid, apiToken = "")
+        }
+        message.value = "服务器地址与用户 ID 已保存。"
     }
 
     fun testServer() = viewModelScope.launch {
@@ -138,7 +144,7 @@ fun SettingsScreen(nav: NavController) {
     var capacity by rememberSaveable { mutableStateOf(settings.capacityKwh.toString()) }
     var days by rememberSaveable { mutableStateOf(settings.syncDays.toString()) }
     var baseUrl by rememberSaveable { mutableStateOf(server.baseUrl) }
-    var token by rememberSaveable { mutableStateOf(server.apiToken) }
+    var userId by rememberSaveable { mutableStateOf(server.userId) }
     var confirm by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(settings) {
         drive = settings.driveIntervalSec.toString()
@@ -147,9 +153,9 @@ fun SettingsScreen(nav: NavController) {
         capacity = settings.capacityKwh.toString()
         days = settings.syncDays.toString()
     }
-    LaunchedEffect(server.baseUrl, server.apiToken) {
+    LaunchedEffect(server.baseUrl, server.userId) {
         baseUrl = server.baseUrl
-        token = server.apiToken
+        userId = server.userId
     }
     val now = System.currentTimeMillis()
     val cool = sync?.let { backoffMessage(BackoffState(it.backoffLevel, it.cooldownUntilMs), now) }
@@ -186,21 +192,26 @@ fun SettingsScreen(nav: NavController) {
                     singleLine = true,
                 )
                 OutlinedTextField(
-                    token,
-                    { token = it },
+                    userId,
+                    { userId = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Bearer Token（加密保存）") },
+                    label = { Text("用户 ID（必填，绑定云端数据）") },
                     singleLine = true,
+                )
+                Text(
+                    "同一用户 ID 可在不同手机同步云端数据，建议设个不易被猜到的标识",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
-                        onClick = { vm.saveServer(baseUrl, token) },
+                        onClick = { vm.saveServer(baseUrl, userId) },
                         enabled = !busy,
                         modifier = Modifier.weight(1f),
                     ) { Text("保存连接") }
                     OutlinedButton(
                         onClick = {
-                            vm.saveServer(baseUrl, token)
+                            vm.saveServer(baseUrl, userId)
                             vm.testServer()
                         },
                         enabled = !busy,

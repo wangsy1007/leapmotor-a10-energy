@@ -104,12 +104,15 @@ class LeapClient:
     def __init__(
         self,
         db: Database,
+        user_id: str,
         client: httpx.AsyncClient | None = None,
         clock: Callable[[], int] | None = None,
         rsa: Callable[[str], str] | None = None,
+        owns_client: bool | None = None,
     ) -> None:
         self.db = db
-        self._owns_client = client is None
+        self.user_id = user_id
+        self._owns_client = owns_client if owns_client is not None else (client is None)
         self.http = client or httpx.AsyncClient(
             transport=ipv4_transport(),
             timeout=httpx.Timeout(30.0, connect=20.0),
@@ -119,13 +122,14 @@ class LeapClient:
         self.rsa = rsa or crypto.encrypt_rsa_pkcs1_base64url
         self.hint_vin = ""
         self.hint_car_type = ""
+        self.db.ensure_user(user_id)
 
     async def aclose(self) -> None:
         if self._owns_client:
             await self.http.aclose()
 
     def session(self) -> dict[str, Any]:
-        return self.db.get_session()
+        return self.db.get_session(self.user_id)
 
     async def ensure_device_id(self) -> str:
         sess = self.session()
@@ -134,7 +138,7 @@ class LeapClient:
         device_id = crypto.new_device_id()
         data = dict(sess)
         data["device_id"] = device_id
-        self.db.save_session(data, self.clock())
+        self.db.save_session(self.user_id, data, self.clock())
         return device_id
 
     async def request_sms(self, phone: str) -> LeapResult:
@@ -171,7 +175,7 @@ class LeapClient:
         sess = self.session()
         if not sess.get("refresh_token") or not sess.get("device_id"):
             return self._local_fail("缺少 refreshToken 或 deviceId，请重新短信登录")
-        account_id = sess.get("account_id") or sess.get("user_id") or ""
+        account_id = sess.get("account_id") or sess.get("leap_user_id") or ""
         if not account_id or not sess.get("phone"):
             return self._local_fail("缺少 accountId 或手机号，无法免短信续期")
         cipher = self.rsa(sess["phone"])
@@ -211,7 +215,7 @@ class LeapClient:
 
     async def car_login(self) -> LeapResult:
         sess = self.session()
-        account_id = sess.get("account_id") or sess.get("user_id") or ""
+        account_id = sess.get("account_id") or sess.get("leap_user_id") or ""
         if not sess.get("token") or not account_id:
             return self._local_fail("缺少账号令牌，请先登录")
         body = {
@@ -327,7 +331,7 @@ class LeapClient:
                 return refreshed
             saved = dict(saved)
             saved["car_refresh_broken"] = 1
-            self.db.save_session(saved, self.clock())
+            self.db.save_session(self.user_id, saved, self.clock())
         return await self.car_login()
 
     async def _signed(self, block) -> LeapResult:
@@ -382,9 +386,13 @@ class LeapClient:
         headers["x-api-signature-version"] = crypto.SIGNATURE_VERSION
         if sess.get("car_token"):
             headers["token"] = sess["car_token"]
-        user_id = sess.get("account_id") if account_scope and sess.get("account_id") else sess.get("user_id")
-        if user_id:
-            headers["userId"] = user_id
+        leap_uid = (
+            sess.get("account_id")
+            if account_scope and sess.get("account_id")
+            else sess.get("leap_user_id")
+        )
+        if leap_uid:
+            headers["userId"] = leap_uid
         car_vin = vin or self.hint_vin
         if car_vin:
             headers["carvin"] = car_vin
@@ -453,7 +461,7 @@ class LeapClient:
         )
         if ttl > 0:
             current["token_expires_at_ms"] = now_ms + ttl * 1000
-        self.db.save_session(current, now_ms)
+        self.db.save_session(self.user_id, current, now_ms)
 
     def _absorb_car(self, root: dict[str, Any] | None) -> None:
         if not isinstance(root, dict):
@@ -483,13 +491,13 @@ class LeapClient:
         current["car_token_expires_at_ms"] = self.clock() + ttl * 1000
         if hkdf:
             current["hkdf_key_hex"] = hkdf
-        current["user_id"] = str(data.get("accountId") or current.get("user_id") or "")
+        current["leap_user_id"] = str(data.get("accountId") or current.get("leap_user_id") or "")
         if r2:
             current["sign_r2"] = r2
         if r3:
             current["sign_r3"] = r3
         current["car_refresh_broken"] = 0
-        self.db.save_session(current, self.clock())
+        self.db.save_session(self.user_id, current, self.clock())
 
     async def _account_headers(self, include_content_type: bool = True) -> dict[str, str]:
         sess = self.session()

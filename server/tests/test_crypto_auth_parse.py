@@ -83,7 +83,10 @@ def test_auth_compare_digest():
     assert verify_api_token("secret", "secret")
     assert not verify_api_token("secret", "other")
     assert not verify_api_token(None, "secret")
-    assert not verify_api_token("secret", "")
+    # expected 为空：开放直连，任意 provided 都放行
+    assert verify_api_token("secret", "")
+    assert verify_api_token(None, "")
+    assert verify_api_token("", "")
 
 
 def test_parse_signal_prefers_precise_soc_and_sts():

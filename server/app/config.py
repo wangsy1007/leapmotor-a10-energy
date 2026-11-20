@@ -25,12 +25,9 @@ class Settings(BaseSettings):
     collector_enabled: bool = Field(default=True, alias="COLLECTOR_ENABLED")
     tz: str = Field(default="Asia/Shanghai", alias="TZ")
 
-    def require_api_token(self) -> None:
-        token = (self.api_token or "").strip()
-        if not token:
-            raise RuntimeError(
-                "API_TOKEN 为空，拒绝启动。请在 .env 中设置一个足够长的随机 Bearer Token。"
-            )
+    @property
+    def token_required(self) -> bool:
+        return bool((self.api_token or "").strip())
 
 
 @lru_cache

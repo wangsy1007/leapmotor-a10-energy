@@ -5,7 +5,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 
-from .auth import require_api_token
+from .auth import optional_api_token, require_user_id
 from .energy import ManualInput, build_manual_trip, export_csv, trip_to_api
 from .leap_client import friendly_message
 from .redactor import mask_vin, redact_secrets
@@ -20,7 +20,10 @@ from .schemas import (
 )
 from .trip_engine import SocSource
 
-router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_api_token)])
+router = APIRouter(
+    prefix="/api/v1",
+    dependencies=[Depends(optional_api_token)],
+)
 
 
 def _collector(request: Request):
@@ -32,32 +35,40 @@ def _db(request: Request):
 
 
 @router.get("/status")
-async def status(request: Request) -> dict[str, Any]:
-    return _collector(request).status()
+async def status(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
+    return _collector(request).status(user_id)
 
 
 @router.post("/poll/now")
-async def poll_now(request: Request) -> dict[str, Any]:
+async def poll_now(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
     collector = _collector(request)
-    outcome = await collector.poll_once(include_energy=True)
-    return {"ok": True, **outcome, "status": collector.status()}
+    outcome = await collector.poll_once(user_id, include_energy=True)
+    return {"ok": True, **outcome, "status": collector.status(user_id)}
 
 
 @router.post("/session/sync")
-async def session_sync(body: SessionSyncRequest, request: Request) -> dict[str, Any]:
+async def session_sync(
+    body: SessionSyncRequest,
+    request: Request,
+    user_id: Annotated[str, Depends(require_user_id)],
+) -> dict[str, Any]:
     if not body.refreshToken and not body.token:
         raise HTTPException(status_code=400, detail="至少需要 token 或 refreshToken")
-    return await _collector(request).sync_session(body.model_dump(exclude_none=True))
+    return await _collector(request).sync_session(user_id, body.model_dump(exclude_none=True))
 
 
 @router.delete("/session")
-async def session_clear(request: Request) -> dict[str, Any]:
-    return await _collector(request).clear_session()
+async def session_clear(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
+    return await _collector(request).clear_session(user_id)
 
 
 @router.post("/leapmotor/send-sms")
-async def send_sms(body: SmsRequest, request: Request) -> dict[str, Any]:
-    result = await _collector(request).client.request_sms(body.phone)
+async def send_sms(
+    body: SmsRequest,
+    request: Request,
+    user_id: Annotated[str, Depends(require_user_id)],
+) -> dict[str, Any]:
+    result = await _collector(request).worker(user_id).client.request_sms(body.phone)
     return {
         "ok": result.ok,
         "code": result.code,
@@ -67,9 +78,14 @@ async def send_sms(body: SmsRequest, request: Request) -> dict[str, Any]:
 
 
 @router.post("/leapmotor/login")
-async def leapmotor_login(body: LoginRequest, request: Request) -> dict[str, Any]:
+async def leapmotor_login(
+    body: LoginRequest,
+    request: Request,
+    user_id: Annotated[str, Depends(require_user_id)],
+) -> dict[str, Any]:
     collector = _collector(request)
-    result = await collector.client.login(body.phone, body.smsCode)
+    worker = collector.worker(user_id)
+    result = await worker.client.login(body.phone, body.smsCode)
     if not result.ok:
         return {
             "ok": False,
@@ -77,7 +93,7 @@ async def leapmotor_login(body: LoginRequest, request: Request) -> dict[str, Any
             "message": friendly_message(result),
             "rateLimited": result.rate_limited,
         }
-    gate = await collector.client.ensure_session()
+    gate = await worker.client.ensure_session()
     if gate is not None and not gate.ok:
         return {
             "ok": False,
@@ -85,23 +101,27 @@ async def leapmotor_login(body: LoginRequest, request: Request) -> dict[str, Any
             "message": f"账号已登录，但车端交换失败：{friendly_message(gate)}",
             "rateLimited": gate.rate_limited,
         }
-    collector.db.update_settings(collector_enabled=1)
-    collector.wake()
-    poll = await collector.poll_once(include_energy=True)
-    return {"ok": True, "message": "登录成功，服务端开始采集", "poll": poll, "status": collector.status()}
+    _db(request).update_settings(user_id, collector_enabled=1)
+    collector.wake(user_id)
+    poll = await collector.poll_once(user_id, include_energy=True)
+    return {"ok": True, "message": "登录成功，服务端开始采集", "poll": poll, "status": collector.status(user_id)}
 
 
 @router.get("/trips")
-async def list_trips(request: Request) -> dict[str, Any]:
+async def list_trips(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
     db = _db(request)
-    settings = db.get_settings()
+    settings = db.get_settings(user_id)
     capacity = float(settings.get("battery_usable_kwh") or 50.0)
-    trips = [trip_to_api(t, capacity) for t in db.list_trips()]
-    return {"trips": trips, "capacityKwh": capacity}
+    trips = [trip_to_api(t, capacity) for t in db.list_trips(user_id)]
+    return {"trips": trips, "capacityKwh": capacity, "userId": user_id}
 
 
 @router.post("/trips")
-async def create_trip(body: TripCreateRequest, request: Request) -> dict[str, Any]:
+async def create_trip(
+    body: TripCreateRequest,
+    request: Request,
+    user_id: Annotated[str, Depends(require_user_id)],
+) -> dict[str, Any]:
     db = _db(request)
     try:
         soc_source = SocSource(body.socSource)
@@ -130,22 +150,32 @@ async def create_trip(body: TripCreateRequest, request: Request) -> dict[str, An
     )
     if built.error or built.trip is None:
         raise HTTPException(status_code=400, detail=built.error or "无法保存")
-    now = _collector(request).client.clock()
-    db.upsert_trip(built.trip, now)
-    capacity = float(db.get_settings().get("battery_usable_kwh") or 50.0)
+    now = _collector(request).worker(user_id).client.clock()
+    db.upsert_trip(user_id, built.trip, now)
+    capacity = float(db.get_settings(user_id).get("battery_usable_kwh") or 50.0)
     return {"ok": True, "trip": trip_to_api(built.trip, capacity)}
 
 
 @router.patch("/trips/{trip_id}")
-async def patch_trip(trip_id: str, body: TripPatchRequest, request: Request) -> dict[str, Any]:
+async def patch_trip(
+    trip_id: str,
+    body: TripPatchRequest,
+    request: Request,
+    user_id: Annotated[str, Depends(require_user_id)],
+) -> dict[str, Any]:
     db = _db(request)
-    trip = db.get_trip(trip_id)
+    trip = db.get_trip(user_id, trip_id)
     if trip is None:
         raise HTTPException(status_code=404, detail="行程不存在")
-    now = _collector(request).client.clock()
+    now = _collector(request).worker(user_id).client.clock()
     if body.note is not None or body.tags is not None:
-        db.update_trip_note(trip_id, body.note if body.note is not None else trip.note, body.tags if body.tags is not None else trip.tags, now)
-    # 允许对手动行程做较完整修正
+        db.update_trip_note(
+            user_id,
+            trip_id,
+            body.note if body.note is not None else trip.note,
+            body.tags if body.tags is not None else trip.tags,
+            now,
+        )
     data = body.model_dump(exclude_none=True)
     if any(k not in ("note", "tags") for k in data):
         try:
@@ -175,36 +205,40 @@ async def patch_trip(trip_id: str, body: TripPatchRequest, request: Request) -> 
         )
         if built.error or built.trip is None:
             raise HTTPException(status_code=400, detail=built.error or "无法更新")
-        db.upsert_trip(built.trip, now)
-    capacity = float(db.get_settings().get("battery_usable_kwh") or 50.0)
-    updated = db.get_trip(trip_id)
+        db.upsert_trip(user_id, built.trip, now)
+    capacity = float(db.get_settings(user_id).get("battery_usable_kwh") or 50.0)
+    updated = db.get_trip(user_id, trip_id)
     return {"ok": True, "trip": trip_to_api(updated, capacity) if updated else None}
 
 
 @router.delete("/trips/{trip_id}")
-async def delete_trip(trip_id: str, request: Request) -> dict[str, Any]:
+async def delete_trip(
+    trip_id: str,
+    request: Request,
+    user_id: Annotated[str, Depends(require_user_id)],
+) -> dict[str, Any]:
     db = _db(request)
-    if db.get_trip(trip_id) is None:
+    if db.get_trip(user_id, trip_id) is None:
         raise HTTPException(status_code=404, detail="行程不存在")
-    db.delete_trip(trip_id)
+    db.delete_trip(user_id, trip_id)
     return {"ok": True}
 
 
 @router.post("/trips/manual-start")
-async def manual_start(request: Request) -> dict[str, Any]:
-    return await _collector(request).manual_start()
+async def manual_start(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
+    return await _collector(request).manual_start(user_id)
 
 
 @router.post("/trips/manual-stop")
-async def manual_stop(request: Request) -> dict[str, Any]:
-    return await _collector(request).manual_stop()
+async def manual_stop(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
+    return await _collector(request).manual_stop(user_id)
 
 
 @router.get("/trips/export.csv")
-async def export_trips_csv(request: Request) -> Response:
+async def export_trips_csv(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> Response:
     db = _db(request)
-    capacity = float(db.get_settings().get("battery_usable_kwh") or 50.0)
-    csv_text = export_csv(db.list_trips(), capacity)
+    capacity = float(db.get_settings(user_id).get("battery_usable_kwh") or 50.0)
+    csv_text = export_csv(db.list_trips(user_id), capacity)
     return PlainTextResponse(
         csv_text,
         media_type="text/csv; charset=utf-8",
@@ -213,13 +247,13 @@ async def export_trips_csv(request: Request) -> Response:
 
 
 @router.get("/stats")
-async def stats(request: Request) -> dict[str, Any]:
-    return _collector(request).stats()
+async def stats(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
+    return _collector(request).stats(user_id)
 
 
 @router.get("/daily-energy")
-async def daily_energy(request: Request) -> dict[str, Any]:
-    rows = _db(request).list_official_days()
+async def daily_energy(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
+    rows = _db(request).list_official_days(user_id)
     return {
         "days": [
             {
@@ -238,27 +272,31 @@ async def daily_energy(request: Request) -> dict[str, Any]:
 
 
 @router.get("/diagnostics")
-async def diagnostics_get(request: Request) -> dict[str, Any]:
-    saved = {k: redact_secrets(v) for k, v in _db(request).read_all_diagnostics().items()}
-    return {"saved": saved}
+async def diagnostics_get(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
+    saved = {k: redact_secrets(v) for k, v in _db(request).read_all_diagnostics(user_id).items()}
+    return {"saved": saved, "userId": user_id}
 
 
 @router.post("/diagnostics/run")
-async def diagnostics_run(request: Request) -> dict[str, Any]:
-    return await _collector(request).run_diagnostics()
+async def diagnostics_run(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
+    return await _collector(request).run_diagnostics(user_id)
 
 
 @router.get("/settings")
-async def get_settings(request: Request) -> dict[str, Any]:
+async def get_settings_api(request: Request, user_id: Annotated[str, Depends(require_user_id)]) -> dict[str, Any]:
     db = _db(request)
-    settings = db.get_settings()
-    sess = db.get_session()
+    settings = db.get_settings(user_id)
+    sess = db.get_session(user_id)
     vin = settings.get("selected_vin") or sess.get("selected_vin") or ""
     return settings_response(settings, mask_vin(str(vin)))
 
 
 @router.put("/settings")
-async def put_settings(body: SettingsUpdateRequest, request: Request) -> dict[str, Any]:
+async def put_settings(
+    body: SettingsUpdateRequest,
+    request: Request,
+    user_id: Annotated[str, Depends(require_user_id)],
+) -> dict[str, Any]:
     db = _db(request)
     kwargs: dict[str, Any] = {}
     if body.batteryUsableKwh is not None:
@@ -275,10 +313,10 @@ async def put_settings(body: SettingsUpdateRequest, request: Request) -> dict[st
         kwargs["collector_enabled"] = 1 if body.collectorEnabled else 0
     if body.selectedVin is not None:
         kwargs["selected_vin"] = body.selectedVin.strip()
-        sess = dict(db.get_session())
+        sess = dict(db.get_session(user_id))
         sess["selected_vin"] = kwargs["selected_vin"]
-        db.save_session(sess, _collector(request).client.clock())
-    updated = db.update_settings(**kwargs)
-    _collector(request).wake()
-    vin = updated.get("selected_vin") or db.get_session().get("selected_vin") or ""
+        db.save_session(user_id, sess, _collector(request).worker(user_id).client.clock())
+    updated = db.update_settings(user_id, **kwargs)
+    _collector(request).wake(user_id)
+    vin = updated.get("selected_vin") or db.get_session(user_id).get("selected_vin") or ""
     return {"ok": True, "settings": settings_response(updated, mask_vin(str(vin)))}
