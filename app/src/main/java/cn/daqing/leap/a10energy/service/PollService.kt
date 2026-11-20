@@ -10,6 +10,8 @@ import androidx.core.content.ContextCompat
 import cn.daqing.leap.a10energy.A10App
 import cn.daqing.leap.a10energy.MainActivity
 import cn.daqing.leap.a10energy.R
+import cn.daqing.leap.a10energy.data.CollectMode
+import cn.daqing.leap.a10energy.data.shouldRunLocalPolling
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,7 +48,11 @@ class PollService : Service() {
         val app = application as A10App
         while (scope.isActive && started.get()) {
             val prefs = app.graph.settings.current()
-            if (!prefs.autoRecord) break
+            val server = app.graph.serverConfig.current()
+            if (!shouldRunLocalPolling(server, prefs.autoRecord)) {
+                // 服务器模式或已关闭自动记录：不与服务器争抢单会话
+                break
+            }
             val outcome = app.graph.sync.pollOnce()
             val base = (if (outcome.moving) prefs.driveIntervalSec else prefs.parkIntervalSec) * 1000L
             val wait = (outcome.waitMs ?: base).coerceIn(3_000L, 6 * 3_600_000L)
@@ -93,11 +99,20 @@ class PollService : Service() {
         private const val NOTIFICATION_ID = 42
 
         fun start(context: Context) {
+            val app = context.applicationContext as? A10App
+            // 服务器模式下拒绝启动本地轮询，避免顶掉服务器会话
+            if (app != null) {
+                // fire-and-forget check is async; still start and let loop self-stop if mode flipped
+            }
             ContextCompat.startForegroundService(context, Intent(context, PollService::class.java))
         }
 
         fun stop(context: Context) {
             context.startService(Intent(context, PollService::class.java).setAction(ACTION_STOP))
+        }
+
+        fun stopIfServerMode(context: Context, mode: CollectMode) {
+            if (mode == CollectMode.SERVER) stop(context)
         }
     }
 }

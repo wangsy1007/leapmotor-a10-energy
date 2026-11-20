@@ -7,6 +7,9 @@ import android.os.Build
 import cn.daqing.leap.a10energy.data.DiagnosticStore
 import cn.daqing.leap.a10energy.data.EncryptedSessionRepository
 import cn.daqing.leap.a10energy.data.LiveCache
+import cn.daqing.leap.a10energy.data.ServerApiClient
+import cn.daqing.leap.a10energy.data.ServerConfigStore
+import cn.daqing.leap.a10energy.data.ServerSync
 import cn.daqing.leap.a10energy.data.SettingsStore
 import cn.daqing.leap.a10energy.data.TripRepository
 import cn.daqing.leap.a10energy.data.VehicleSync
@@ -32,7 +35,22 @@ class A10App : Application() {
         val trips = TripRepository(db)
         val client = LeapClient(sessions)
         val sync = VehicleSync(client, trips, settings, diagnostics, cache)
-        graph = AppGraph(db, sessions, settings, diagnostics, cache, trips, client, sync)
+        val serverConfig = ServerConfigStore(this)
+        val serverApi = ServerApiClient(serverConfig)
+        val serverSync = ServerSync(serverApi, trips, settings, serverConfig, cache, diagnostics)
+        graph = AppGraph(
+            db,
+            sessions,
+            settings,
+            diagnostics,
+            cache,
+            trips,
+            client,
+            sync,
+            serverConfig,
+            serverApi,
+            serverSync,
+        )
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             client.ensureDeviceId()
         }
@@ -60,4 +78,7 @@ class AppGraph(
     val trips: TripRepository,
     val client: LeapClient,
     val sync: VehicleSync,
+    val serverConfig: ServerConfigStore,
+    val serverApi: ServerApiClient,
+    val serverSync: ServerSync,
 )

@@ -13,3 +13,9 @@ captures/
 app/schemas/
 *.hprof
 .externalNativeBuild/
+server/.venv/
+server/data/
+server/.env
+server/**/__pycache__/
+server/.pytest_cache/
+

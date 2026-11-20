@@ -25,9 +25,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cn.daqing.leap.a10energy.A10App
+import cn.daqing.leap.a10energy.data.CollectMode
 import cn.daqing.leap.a10energy.domain.backoffMessage
 import cn.daqing.leap.a10energy.domain.registerRateLimit
 import cn.daqing.leap.a10energy.protocol.friendlyLeapMessage
+import cn.daqing.leap.a10energy.service.PollService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -88,8 +90,17 @@ class LoginViewModel(private val app: A10App) : ViewModel() {
             message.value = "账号已登录，但车端交换失败：${friendlyLeapMessage(car)}"
             return@launch
         }
-        message.value = "登录成功"
-        app.graph.sync.refresh()
+        val server = app.graph.serverConfig.current()
+        if (server.mode == CollectMode.SERVER && server.serverReady) {
+            // 先拉一次本地车况拿到 VIN / 路由，再把完整会话推给服务器并停止本机轮询
+            app.graph.sync.refresh()
+            val pushed = app.graph.serverSync.pushSession(app.graph.sessions)
+            PollService.stop(app)
+            message.value = "登录成功。$pushed"
+        } else {
+            message.value = "登录成功"
+            app.graph.sync.refresh()
+        }
         onDone()
     }
 
@@ -129,6 +140,7 @@ fun LoginScreen(onDone: () -> Unit) {
         SectionCard {
             Text("请使用「车辆共享」子账号", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
             Text("零跑云是单账号单会话。用主账号登录会把官方 App 顶下线。先在官方 App 里把车共享给另一个手机号，再用那个号码收验证码。")
+            Text("请尽量在国内手机网络完成登录。若已开启服务器采集模式，登录成功后会自动把会话推送到自建服务，并由服务器 24 小时采集。", style = MaterialTheme.typography.bodySmall)
             Text("deviceId 会固定保存在本机。换机会导致刷新令牌失效，需要重新短信登录。", style = MaterialTheme.typography.bodySmall)
         }
         OutlinedTextField(phone, { phone = it.filter { ch -> ch.isDigit() }.take(11) }, modifier = Modifier.fillMaxWidth(), label = { Text("手机号") }, singleLine = true)

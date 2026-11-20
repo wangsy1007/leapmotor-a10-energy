@@ -54,7 +54,13 @@ fun CalibrationScreen(onBack: () -> Unit) {
                 }
                 scope.launch {
                     app.graph.settings.update { it.copy(capacityKwh = capacity) }
-                    result = "已写入 ${fmt(capacity, 2, " kWh")}。历史行程的电量会按新容量重算。"
+                    val server = app.graph.serverConfig.current()
+                    val extra = if (server.mode == cn.daqing.leap.a10energy.data.CollectMode.SERVER && server.serverReady) {
+                        " " + app.graph.serverSync.pushLocalSettings(app.graph.settings.current())
+                    } else {
+                        ""
+                    }
+                    result = "已写入 ${fmt(capacity, 2, " kWh")}。历史行程的电量会按新容量重算。$extra"
                 }
             },
             enabled = capacity != null,

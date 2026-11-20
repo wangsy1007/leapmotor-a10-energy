@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  允许用户在设置页配置的自建采集服务使用 HTTP（例如 http://192.168.x.x:18080）。
+  官方零跑 HTTPS 域名仍走系统默认校验。不在此硬编码任何真实 IP。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

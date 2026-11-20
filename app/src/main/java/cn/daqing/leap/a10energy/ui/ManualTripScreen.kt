@@ -75,7 +75,16 @@ class ManualTripViewModel(private val app: A10App, private val existingId: Strin
             error.value = built.error ?: "无法保存"
             return@launch
         }
-        app.graph.trips.saveManual(built)
+        val server = app.graph.serverConfig.current()
+        if (server.mode == cn.daqing.leap.a10energy.data.CollectMode.SERVER && server.serverReady) {
+            val msg = app.graph.serverSync.saveManual(built)
+            if (msg.contains("无法") || msg.contains("失败") || msg.contains("错误") || msg.contains("HTTP")) {
+                error.value = msg
+                return@launch
+            }
+        } else {
+            app.graph.trips.saveManual(built)
+        }
         onDone()
     }
 }

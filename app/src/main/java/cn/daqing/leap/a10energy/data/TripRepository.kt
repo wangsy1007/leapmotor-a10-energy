@@ -44,6 +44,8 @@ class TripRepository(private val db: AppDatabase) {
 
     suspend fun getTrip(id: String): TripRecord? = db.trips().get(id)?.toRecord()
 
+    suspend fun getAllTrips(): List<TripRecord> = db.trips().getAll().map { it.toRecord() }
+
     suspend fun updateNote(id: String, note: String, tags: String) {
         db.trips().updateNote(id, note.trim(), tags.trim(), System.currentTimeMillis())
     }
