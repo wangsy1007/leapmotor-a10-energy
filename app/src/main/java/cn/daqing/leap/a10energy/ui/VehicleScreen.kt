@@ -101,6 +101,7 @@ fun VehicleScreen(nav: NavController) {
         Text("车况", style = MaterialTheme.typography.headlineMedium)
         Text("零跑 A10 505 激光雷达版 · 大庆冬季", color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        BatteryTempCard(snap?.batteryMinTemp)
         if (sync?.selectedVin.isNullOrBlank()) {
             SectionCard {
                 Banner("登录后才能拉云端车况。请使用车辆共享子账号，避免把官方 App 顶下线。", warning = true)
@@ -127,7 +128,7 @@ fun VehicleScreen(nav: NavController) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             MetricRow("剩余续航", fmt(snap?.rangeKm, 0, " km"), "总里程", fmt(snap?.odoKm, 1, " km"))
-            MetricRow("电池最低温", fmt(snap?.batteryMinTemp, 1, " ℃"), "车内温度", fmt(snap?.interiorTemp, 1, " ℃"))
+            Metric("车内温度", fmt(snap?.interiorTemp, 1, " ℃"))
             Text(snap?.statusLabel() ?: "状态未知", style = MaterialTheme.typography.titleMedium)
             Text(
                 "档位 ${gearLabel(snap?.gear)} · 车速 ${fmt(snap?.speedKmh, 0, " km/h")} · 充电码 ${snap?.chargeCode ?: "--"} · 运行状态 ${snap?.vehicleStateCode ?: "--"}",
