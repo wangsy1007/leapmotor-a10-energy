@@ -47,6 +47,7 @@ private val DarkColors = darkColorScheme(
 )
 
 val SocNumberStyle = TextStyle(fontSize = 52.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
+val BatteryTempNumberStyle = TextStyle(fontSize = 40.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
 
 @Composable
 fun A10Theme(content: @Composable () -> Unit) {

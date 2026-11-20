@@ -58,6 +58,9 @@ fun parseSignalResponse(raw: String): SignalParse {
         odoKm = map.firstNumber("1318", "totalMileage", "odometer"),
         speedKmh = speed,
         gear = gear,
+        // 国内 SIGNAL_IDS 里电池温度只有 1182（电池最低温 ℃）。
+        // 具名 minBatteryTemp / minSingleTemp 只是 T03 那类具名帧的兜底。
+        // 1186 是电池加热开关，1349 是车内温度，协议表里没有电池最高温或平均温。
         batteryMinTemp = map.firstNumber("1182", "minBatteryTemp", "minSingleTemp"),
         interiorTemp = map.firstNumber("1349", "indoorTemp", "interiorTemp"),
         chargeCode = charge,

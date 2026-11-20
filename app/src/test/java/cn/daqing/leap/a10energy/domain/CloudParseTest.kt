@@ -86,6 +86,44 @@ class CloudParseTest {
     }
 
     @Test
+    fun batteryMinTemp_reads1182AndIgnoresHeatingAndCabin() {
+        val snap = parseSignalResponse(
+            """{"code":0,"data":{"signalMap":{"1182":-12,"1186":1,"1349":18,"2183":26,"sts":1700000000000}}}""",
+        ).snapshot!!
+        assertEquals(-12.0, snap.batteryMinTemp!!, 0.001)
+        assertEquals(18.0, snap.interiorTemp!!, 0.001)
+    }
+
+    @Test
+    fun batteryMinTemp_absentWithout1182() {
+        val snap = parseSignalResponse(
+            """{"code":0,"data":{"signalMap":{"1186":1,"1349":5,"sts":1700000000000}}}""",
+        ).snapshot!!
+        assertNull(snap.batteryMinTemp)
+        assertEquals(5.0, snap.interiorTemp!!, 0.001)
+    }
+
+    @Test
+    fun batteryMinTemp_keepsZeroAndPrefersNumericOverNamed() {
+        val zero = parseSignalResponse(
+            """{"code":0,"data":{"signalMap":{"1182":0,"sts":1700000000001}}}""",
+        ).snapshot!!
+        assertEquals(0.0, zero.batteryMinTemp!!, 0.001)
+        val named = parseSignalResponse(
+            """{"code":0,"data":{"signalMap":{"minBatteryTemp":"-10.5","sts":1700000000002}}}""",
+        ).snapshot!!
+        assertEquals(-10.5, named.batteryMinTemp!!, 0.001)
+        val alias = parseSignalResponse(
+            """{"code":0,"data":{"signalMap":{"minSingleTemp":"-7","sts":1700000000003}}}""",
+        ).snapshot!!
+        assertEquals(-7.0, alias.batteryMinTemp!!, 0.001)
+        val numericWins = parseSignalResponse(
+            """{"code":0,"data":{"signalMap":{"1182":-18,"minBatteryTemp":30,"minSingleTemp":4,"sts":1700000000004}}}""",
+        ).snapshot!!
+        assertEquals(-18.0, numericWins.batteryMinTemp!!, 0.001)
+    }
+
+    @Test
     fun checklist_marksMissingA10Keys() {
         val items = diagnoseSignalKeys(setOf("1204", "1318", "sts")).associateBy { it.id }
         assertFalse(items.getValue("100003").present)
